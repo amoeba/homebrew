@@ -3,12 +3,14 @@ require 'utils/json'
 class AbstractDownloadStrategy
   include FileUtils
 
-  attr_reader :name, :resource
+  attr_reader :meta, :name, :version, :resource
 
   def initialize name, resource
     @name = name
     @resource = resource
-    @url  = resource.url
+    @url = resource.url
+    @version = resource.version
+    @meta = resource.specs
   end
 
   def expand_safe_system_args args
@@ -87,7 +89,7 @@ class VCSDownloadStrategy < AbstractDownloadStrategy
 
   def initialize name, resource
     super
-    @ref_type, @ref = extract_ref(resource.specs)
+    @ref_type, @ref = extract_ref(meta)
     @clone = HOMEBREW_CACHE.join(cache_filename)
   end
 
@@ -119,7 +121,7 @@ class VCSDownloadStrategy < AbstractDownloadStrategy
   end
 
   def head?
-    resource.version.head?
+    version.head?
   end
 
   private
@@ -154,30 +156,13 @@ class CurlDownloadStrategy < AbstractDownloadStrategy
   def initialize(name, resource)
     super
     @mirrors = resource.mirrors.dup
-    @tarball_path = HOMEBREW_CACHE.join("#{name}-#{resource.version}#{ext}")
-    @temporary_path = Pathname.new("#{tarball_path}.incomplete")
-  end
-
-  def cached_location
-    tarball_path
-  end
-
-  def clear_cache
-    [cached_location, temporary_path].each { |f| f.unlink if f.exist? }
-  end
-
-  def downloaded_size
-    temporary_path.size? or 0
-  end
-
-  # Private method, can be overridden if needed.
-  def _fetch
-    curl @url, '-C', downloaded_size, '-o', temporary_path
+    @tarball_path = HOMEBREW_CACHE.join("#{name}-#{version}#{ext}")
+    @temporary_path = Pathname.new("#{cached_location}.incomplete")
   end
 
   def fetch
     ohai "Downloading #{@url}"
-    unless tarball_path.exist?
+    unless cached_location.exist?
       had_incomplete_download = temporary_path.exist?
       begin
         _fetch
@@ -198,9 +183,9 @@ class CurlDownloadStrategy < AbstractDownloadStrategy
           raise CurlDownloadStrategyError, msg
         end
       end
-      ignore_interrupts { temporary_path.rename(tarball_path) }
+      ignore_interrupts { temporary_path.rename(cached_location) }
     else
-      puts "Already downloaded: #{tarball_path}"
+      puts "Already downloaded: #{cached_location}"
     end
   rescue CurlDownloadStrategyError
     raise if mirrors.empty?
@@ -209,24 +194,10 @@ class CurlDownloadStrategy < AbstractDownloadStrategy
     retry
   end
 
-  # gunzip and bunzip2 write the output file in the same directory as the input
-  # file regardless of the current working directory, so we need to write it to
-  # the correct location ourselves.
-  def buffered_write(tool)
-    target = File.basename(basename_without_params, tarball_path.extname)
-
-    Utils.popen_read(tool, "-f", tarball_path.to_s, "-c") do |pipe|
-      File.open(target, "wb") do |f|
-        buf = ""
-        f.write(buf) while pipe.read(1024, buf)
-      end
-    end
-  end
-
   def stage
-    case tarball_path.compression_type
+    case cached_location.compression_type
     when :zip
-      with_system_path { quiet_safe_system 'unzip', {:quiet_flag => '-qq'}, tarball_path }
+      with_system_path { quiet_safe_system 'unzip', {:quiet_flag => '-qq'}, cached_location }
       chdir
     when :gzip_only
       with_system_path { buffered_write("gunzip") }
@@ -234,29 +205,47 @@ class CurlDownloadStrategy < AbstractDownloadStrategy
       with_system_path { buffered_write("bunzip2") }
     when :gzip, :bzip2, :compress, :tar
       # Assume these are also tarred
-      with_system_path { safe_system 'tar', 'xf', tarball_path }
+      with_system_path { safe_system 'tar', 'xf', cached_location }
       chdir
     when :xz
-      with_system_path { safe_system "#{xzpath} -dc \"#{tarball_path}\" | tar xf -" }
+      with_system_path { safe_system "#{xzpath} -dc \"#{cached_location}\" | tar xf -" }
       chdir
     when :lzip
-      with_system_path { safe_system "#{lzippath} -dc \"#{tarball_path}\" | tar xf -" }
+      with_system_path { safe_system "#{lzippath} -dc \"#{cached_location}\" | tar xf -" }
       chdir
     when :xar
-      safe_system "/usr/bin/xar", "-xf", tarball_path
+      safe_system "/usr/bin/xar", "-xf", cached_location
     when :rar
-      quiet_safe_system 'unrar', 'x', {:quiet_flag => '-inul'}, tarball_path
+      quiet_safe_system 'unrar', 'x', {:quiet_flag => '-inul'}, cached_location
     when :p7zip
-      safe_system '7zr', 'x', tarball_path
+      safe_system '7zr', 'x', cached_location
     else
-      cp tarball_path, basename_without_params
+      cp cached_location, basename_without_params
     end
+  end
+
+  def cached_location
+    tarball_path
+  end
+
+  def clear_cache
+    [cached_location, temporary_path].each { |f| f.unlink if f.exist? }
   end
 
   private
 
+  # Private method, can be overridden if needed.
+  def _fetch
+    curl @url, "-C", downloaded_size, "-o", temporary_path
+  end
+
+  def downloaded_size
+    temporary_path.size? || 0
+  end
+
   def curl(*args)
     args << '--connect-timeout' << '5' unless mirrors.empty?
+    args << "--user" << meta.fetch(:user) if meta.key?(:user)
     super
   end
 
@@ -265,6 +254,20 @@ class CurlDownloadStrategy < AbstractDownloadStrategy
     case entries.length
     when 0 then raise "Empty archive"
     when 1 then Dir.chdir entries.first rescue nil
+    end
+  end
+
+  # gunzip and bunzip2 write the output file in the same directory as the input
+  # file regardless of the current working directory, so we need to write it to
+  # the correct location ourselves.
+  def buffered_write(tool)
+    target = File.basename(basename_without_params, cached_location.extname)
+
+    Utils.popen_read(tool, "-f", cached_location.to_s, "-c") do |pipe|
+      File.open(target, "wb") do |f|
+        buf = ""
+        f.write(buf) while pipe.read(1024, buf)
+      end
     end
   end
 
@@ -338,7 +341,7 @@ end
 # Useful for installing jars.
 class NoUnzipCurlDownloadStrategy < CurlDownloadStrategy
   def stage
-    cp tarball_path, basename_without_params
+    cp cached_location, basename_without_params
   end
 end
 
@@ -360,7 +363,7 @@ class CurlBottleDownloadStrategy < CurlDownloadStrategy
   end
 
   def stage
-    ohai "Pouring #{tarball_path.basename}"
+    ohai "Pouring #{cached_location.basename}"
     super
   end
 end
@@ -373,7 +376,7 @@ class LocalBottleDownloadStrategy < CurlDownloadStrategy
   end
 
   def stage
-    ohai "Pouring #{tarball_path.basename}"
+    ohai "Pouring #{cached_location.basename}"
     super
   end
 end
@@ -433,17 +436,11 @@ class SubversionDownloadStrategy < VCSDownloadStrategy
   private
 
   def repo_url
-    `svn info '#{cached_location}' 2>/dev/null`.strip[/^URL: (.+)$/, 1]
-  end
-
-  def shell_quote str
-    # Oh god escaping shell args.
-    # See http://notetoself.vrensk.com/2008/08/escaping-single-quotes-in-ruby-harder-than-expected/
-    str.gsub(/\\|'/) { |c| "\\#{c}" }
+    Utils.popen_read("svn", "info", cached_location.to_s).strip[/^URL: (.+)$/, 1]
   end
 
   def get_externals
-    `svn propget svn:externals '#{shell_quote(@url)}'`.chomp.each_line do |line|
+    Utils.popen_read("svn", "propget", "svn:externals", @url).chomp.each_line do |line|
       name, url = line.split(/\s+/)
       yield name, url
     end
@@ -517,7 +514,7 @@ class GitDownloadStrategy < VCSDownloadStrategy
     super
     @ref_type ||= :branch
     @ref ||= "master"
-    @shallow = resource.specs.fetch(:shallow) { true }
+    @shallow = meta.fetch(:shallow) { true }
   end
 
   def stage
@@ -535,6 +532,10 @@ class GitDownloadStrategy < VCSDownloadStrategy
 
   def cache_tag
     "git"
+  end
+
+  def cache_version
+    0
   end
 
   def update
@@ -603,7 +604,10 @@ class GitDownloadStrategy < VCSDownloadStrategy
 
   def clone_repo
     safe_system 'git', *clone_args
-    cached_location.cd { update_submodules } if submodules?
+    cached_location.cd do
+      safe_system "git", "config", "homebrew.cacheversion", cache_version
+      update_submodules if submodules?
+    end
   end
 
   def checkout
@@ -635,6 +639,11 @@ class GitDownloadStrategy < VCSDownloadStrategy
 end
 
 class CVSDownloadStrategy < VCSDownloadStrategy
+  def initialize(name, resource)
+    super
+    @url = @url.sub(%r[^cvs://], "")
+  end
+
   def stage
     cp_r Dir[cached_location+"{.}"], Dir.pwd
   end
@@ -667,7 +676,7 @@ class CVSDownloadStrategy < VCSDownloadStrategy
   end
 
   def split_url(in_url)
-    parts=in_url.sub(%r[^cvs://], '').split(/:/)
+    parts = in_url.split(/:/)
     mod=parts.pop
     url=parts.join(':')
     [ mod, url ]
@@ -675,6 +684,11 @@ class CVSDownloadStrategy < VCSDownloadStrategy
 end
 
 class MercurialDownloadStrategy < VCSDownloadStrategy
+  def initialize(name, resource)
+    super
+    @url = @url.sub(%r[^hg://], "")
+  end
+
   def stage
     super
 
@@ -699,8 +713,7 @@ class MercurialDownloadStrategy < VCSDownloadStrategy
   end
 
   def clone_repo
-    url = @url.sub(%r[^hg://], "")
-    safe_system hgpath, "clone", url, cached_location
+    safe_system hgpath, "clone", @url, cached_location
   end
 
   def update
@@ -709,6 +722,11 @@ class MercurialDownloadStrategy < VCSDownloadStrategy
 end
 
 class BazaarDownloadStrategy < VCSDownloadStrategy
+  def initialize(name, resource)
+    super
+    @url = @url.sub(%r[^bzr://], "")
+  end
+
   def stage
     # The export command doesn't work on checkouts
     # See https://bugs.launchpad.net/bzr/+bug/897511
@@ -727,9 +745,8 @@ class BazaarDownloadStrategy < VCSDownloadStrategy
   end
 
   def clone_repo
-    url = @url.sub(%r[^bzr://], "")
     # "lightweight" means history-less
-    safe_system bzrpath, "checkout", "--lightweight", url, cached_location
+    safe_system bzrpath, "checkout", "--lightweight", @url, cached_location
   end
 
   def update
@@ -738,6 +755,11 @@ class BazaarDownloadStrategy < VCSDownloadStrategy
 end
 
 class FossilDownloadStrategy < VCSDownloadStrategy
+  def initialize(name, resource)
+    super
+    @url = @url.sub(%r[^fossil://], "")
+  end
+
   def stage
     super
     args = [fossilpath, "open", cached_location]
@@ -752,8 +774,7 @@ class FossilDownloadStrategy < VCSDownloadStrategy
   end
 
   def clone_repo
-    url = @url.sub(%r[^fossil://], "")
-    safe_system fossilpath, "clone", url, cached_location
+    safe_system fossilpath, "clone", @url, cached_location
   end
 
   def update
@@ -814,6 +835,7 @@ class DownloadStrategyDetector
     when :ssl3    then CurlSSL3DownloadStrategy
     when :cvs     then CVSDownloadStrategy
     when :post    then CurlPostDownloadStrategy
+    when :fossil  then FossilDownloadStrategy
     else
       raise "Unknown download strategy #{strategy} was requested."
     end

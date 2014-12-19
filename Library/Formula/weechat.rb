@@ -61,4 +61,9 @@ class Weechat < Formula
       automatically as part of weechat, there won't be any dictionaries.
     EOS
   end
+
+  test do
+    ENV["TERM"] = "xterm"
+    system "weechat", "-r", "/quit"
+  end
 end
