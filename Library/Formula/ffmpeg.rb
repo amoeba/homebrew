@@ -1,5 +1,3 @@
-require "formula"
-
 class Ffmpeg < Formula
   homepage "https://ffmpeg.org/"
   url "https://www.ffmpeg.org/releases/ffmpeg-2.5.2.tar.bz2"
@@ -15,11 +13,11 @@ class Ffmpeg < Formula
 
   option "without-x264", "Disable H.264 encoder"
   option "without-lame", "Disable MP3 encoder"
+  option "without-libvo-aacenc", "Disable VisualOn AAC encoder"
   option "without-xvid", "Disable Xvid MPEG-4 video encoder"
   option "without-qtkit", "Disable deprecated QuickTime framework"
 
   option "with-rtmpdump", "Enable RTMP protocol"
-  option "without-libvo-aacenc", "Enable VisualOn AAC encoder"
   option "with-libass", "Enable ASS/SSA subtitle format"
   option "with-opencore-amr", "Enable Opencore AMR NR/WB audio format"
   option "with-openjpeg", "Enable JPEG 2000 image format"
@@ -81,8 +79,8 @@ class Ffmpeg < Formula
            ]
 
     args << "--enable-libx264" if build.with? "x264"
-    args << "--enable-libfaac" if build.with? "faac"
     args << "--enable-libmp3lame" if build.with? "lame"
+    args << "--enable-libvo-aacenc" if build.with? "libvo-aacenc"
     args << "--enable-libxvid" if build.with? "xvid"
 
     args << "--enable-libfontconfig" if build.with? "fontconfig"
@@ -92,7 +90,7 @@ class Ffmpeg < Formula
     args << "--enable-libvpx" if build.with? "libvpx"
     args << "--enable-librtmp" if build.with? "rtmpdump"
     args << "--enable-libopencore-amrnb" << "--enable-libopencore-amrwb" if build.with? "opencore-amr"
-    args << "--enable-libvo-aacenc" if build.with? "libvo-aacenc"
+    args << "--enable-libfaac" if build.with? "faac"
     args << "--enable-libass" if build.with? "libass"
     args << "--enable-ffplay" if build.with? "ffplay"
     args << "--enable-libspeex" if build.with? "speex"
@@ -161,12 +159,19 @@ class Ffmpeg < Formula
       To install with libfaac, you can:
         brew reinstall ffmpeg --with-faac
 
-      You can also use the libvo-acenc or experimental FFmpeg encoder to
+      You can also use the libvo-aacenc or experimental FFmpeg encoder to
       encode AAC audio:
         -c:a libvo_aacenc
       Or:
         -c:a aac -strict -2
       EOS
     end
+  end
+
+  test do
+    # Create an example mp4 file
+    system "#{bin}/ffmpeg", "-y", "-filter_complex",
+        "testsrc=rate=1:duration=1", "#{testpath}/video.mp4"
+    assert (testpath/"video.mp4").exist?
   end
 end
