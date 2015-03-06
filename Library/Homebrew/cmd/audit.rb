@@ -133,6 +133,14 @@ class FormulaAuditor
     if formula.class < GithubGistFormula
       problem "GithubGistFormula is deprecated, use Formula instead"
     end
+
+    if formula.class < ScriptFileFormula
+      problem "ScriptFileFormula is deprecated, use Formula instead"
+    end
+
+    if formula.class < AmazonWebServicesFormula
+      problem "AmazonWebServicesFormula is deprecated, use Formula instead"
+    end
   end
 
   @@aliases ||= Formula.aliases
@@ -838,9 +846,15 @@ class ResourceAuditor
 
     case checksum.hash_type
     when :md5
-      problem "MD5 checksums are deprecated, please use SHA1 or SHA256"
+      problem "MD5 checksums are deprecated, please use SHA256"
       return
-    when :sha1   then len = 40
+    when :sha1
+      if ARGV.include? "--strict"
+        problem "SHA1 checksums are deprecated, please use SHA256"
+        return
+      else
+        len = 40
+      end
     when :sha256 then len = 64
     end
 
